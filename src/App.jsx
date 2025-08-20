@@ -318,6 +318,7 @@ const BlackjackTrainer = () => {
   const playerCard2 = currentDeck.pop();
   const dealerCard2 = currentDeck.pop();
 
+  // Set player and dealer hands, and update deck
   setPlayerHands([[playerCard1, playerCard2]]);
   setDealerHand([dealerCard1, dealerCard2]);
   setDeck(currentDeck);
@@ -371,6 +372,7 @@ const BlackjackTrainer = () => {
     const newHands = [...playerHands];
     newHands[handIndex] = [...newHands[handIndex], newCard];
     
+    //  Set player's hand and adjust the deck
     setPlayerHands(newHands);
     setDeck(newDeck);
     
@@ -379,10 +381,22 @@ const BlackjackTrainer = () => {
     if (handValue > 21) {
       // Hand busted - move to next hand or end game
       if (handIndex < handsToPlay - 1) {
-        setCurrentHandIndex(handIndex + 1);  // Move to next split hand
-      } else {
-        finishHand('bust');  // All hands complete, end game
-      }
+            setCurrentHandIndex(handIndex + 1);
+          } else {
+            // If ANY other hand (including earlier split hands) is still active,
+            // the dealer must play out before we settle.
+            const anyActiveOtherHand =
+              playerHands.some((h, i) =>
+                i !== handIndex &&
+                calculateHandValue(h) <= 21 &&
+                !surrenderedHands.includes(i)
+              );
+            if (anyActiveOtherHand) {
+              dealerPlay();
+            } else {
+              finishHand('bust'); // all hands are dead → no dealer play needed
+            }
+          }
     }
     
     // Record this decision for strategy analysis
@@ -560,6 +574,8 @@ const BlackjackTrainer = () => {
   
   // Dealer plays automatically according to house rules
   const dealerPlay = useCallback(() => {
+    if (gameState !== 'playing') return; 
+
     let newDealerHand = [...dealerHand];
     let dealerValue = calculateHandValue(newDealerHand);
     let currentDeck = [...deck];
