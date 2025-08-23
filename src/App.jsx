@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Download, Upload, BarChart3, Settings, Play, TrendingUp } from 'lucide-react';
+import { resolveBlackjackRound } from './blackjackLogic';
 
 /**
  * MAIN BLACKJACK TRAINER COMPONENT
@@ -349,6 +350,84 @@ const BlackjackTrainer = () => {
   }
 }, [deck, createDeck, currentBet, calculateHandValue]);
 
+    // ==================== STATISTICS FUNCTIONS ====================
+  /**
+   * STATISTICS TRACKING SYSTEM
+   * Records all game outcomes and decisions for performance analysis.
+   * Enables players to see where their strategy needs improvement.
+   */
+  
+  // Update overall game statistics after each hand
+  const updateStats = useCallback((result, betAmount, netChange) => {
+    setGameStats(prev => ({
+      ...prev,
+      totalHands: prev.totalHands + 1,
+      handsWon: prev.handsWon + (result === 'win' || result === 'blackjack' ? 1 : 0),
+      handsLost: prev.handsLost + (result === 'loss' || result === 'bust' ? 1 : 0),
+      handsPush: prev.handsPush + (result === 'push' ? 1 : 0),
+      totalWagered: prev.totalWagered + betAmount,
+      netWinnings: prev.netWinnings + netChange,
+      blackjacks: prev.blackjacks + (result === 'blackjack' ? 1 : 0),
+      busts: prev.busts + (result === 'bust' ? 1 : 0),
+      surrenders: prev.surrenders + (result === 'surrender' ? 1 : 0)
+    }));
+  }, []);
+
+  // Record individual decisions for detailed strategy analysis
+  const recordDecision = useCallback((playerHand, dealerUpCard, action) => {
+    // Safety check - ensure we have valid inputs
+    if (!dealerUpCard || !playerHand || playerHand.length === 0) return;
+    
+    const playerValue = calculateHandValue(playerHand);
+    const dealerValue = dealerUpCard.value;
+    const isSoft = isSoftHand(playerHand);
+    const isPair = playerHand.length === 2 && playerHand[0].rank === playerHand[1].rank;
+    
+    // Create unique scenario identifier for grouping similar situations
+    let scenarioKey;
+    if (isPair) {
+      scenarioKey = `pair_${playerHand[0].rank}_vs_${dealerUpCard.rank}`;
+    } else if (isSoft) {
+      scenarioKey = `soft_${playerValue}_vs_${dealerUpCard.rank}`;
+    } else {
+      scenarioKey = `hard_${playerValue}_vs_${dealerUpCard.rank}`;
+    }
+    
+    // Calculate what the optimal decision should have been
+    const optimalAction = getOptimalAction(playerHand, dealerUpCard);
+    
+    // Create decision record
+    const decision = {
+      timestamp: Date.now(),
+      playerHand: [...playerHand],
+      dealerUpCard: { ...dealerUpCard },
+      playerValue,
+      dealerValue,
+      action,
+      optimalAction,
+      scenarioKey,
+      isOptimal: action === optimalAction
+    };
+    
+    // Add to decision history
+    setDecisionHistory(prev => [...prev, decision]);
+    
+    // Update scenario-specific statistics
+    setScenarioStats(prev => {
+      const scenario = prev[scenarioKey] || {
+        count: 0,
+        actions: {},
+        optimalAction,
+        correctDecisions: 0
+      };
+      
+      scenario.count++;
+      scenario.actions[action] = (scenario.actions[action] || 0) + 1;
+      if (action === optimalAction) scenario.correctDecisions++;
+      
+      return { ...prev, [scenarioKey]: scenario };
+    });
+  }, [calculateHandValue, isSoftHand, getOptimalAction]);
 
   // Player takes another card
   const hit = useCallback((handIndex = currentHandIndex) => {
@@ -371,6 +450,7 @@ const BlackjackTrainer = () => {
     // Add card to player's hand
     const newHands = [...playerHands];
     newHands[handIndex] = [...newHands[handIndex], newCard];
+    const updatedHand = newHands[handIndex]; 
     
     //  Set player's hand and adjust the deck
     setPlayerHands(newHands);
@@ -386,24 +466,23 @@ const BlackjackTrainer = () => {
             // If ANY other hand (including earlier split hands) is still active,
             // the dealer must play out before we settle.
             const anyActiveOtherHand =
-              playerHands.some((h, i) =>
+              newHands.some((h, i) =>
                 i !== handIndex &&
-                calculateHandValue(h) <= 21 &&
-                !surrenderedHands.includes(i)
+                calculateHandValue(h) <= 21
               );
             if (anyActiveOtherHand) {
               dealerPlay();
             } else {
-              finishHand('bust'); // all hands are dead → no dealer play needed
+              finishHand('bust', dealerHand, newHands, handBets, currentBet); // all hands are dead → no dealer play needed
             }
           }
     }
     
     // Record this decision for strategy analysis
     if (dealerHand.length > 0) {
-      recordDecision(playerHands[handIndex], dealerHand[0], 'hit');
+      recordDecision(updatedHand, dealerHand[0], 'hit');
     }
-  }, [currentHandIndex, deck, playerHands, handsToPlay, dealerHand, calculateHandValue]);
+  }, [currentHandIndex, deck, playerHands, handsToPlay, dealerHand, calculateHandValue, updateStats]);
 
   // Player chooses to stand (take no more cards)
   const stand = useCallback(() => {
@@ -565,38 +644,6 @@ const BlackjackTrainer = () => {
     }
   }, [surrenderAllowed, playerHands, currentHandIndex, currentBet, dealerHand]);
 
-  // ==================== DEALER LOGIC ====================
-  /**
-   * DEALER AUTOMATION
-   * Dealer plays according to fixed house rules.
-   * No strategy decisions - must hit/stand based on total.
-   */
-  
-  // Dealer plays automatically according to house rules
-  const dealerPlay = useCallback(() => {
-    if (gameState !== 'playing') return; 
-
-    let newDealerHand = [...dealerHand];
-    let dealerValue = calculateHandValue(newDealerHand);
-    let currentDeck = [...deck];
-    
-    // Dealer must hit until reaching 17 (or soft 17 based on house rules)
-    while (dealerValue < 17 || (dealerValue === 17 && dealerHitsSoft17 && isSoftHand(newDealerHand))) {
-      // Stop if deck is empty (shouldn't happen in normal play)
-      if (currentDeck.length === 0) break;
-      
-      const newCard = currentDeck.pop();
-      newDealerHand.push(newCard);
-      
-      dealerValue = calculateHandValue(newDealerHand);
-    }
-    setDeck(currentDeck);
-    setDealerHand(newDealerHand);
-    
-    // Small delay before finishing hand for dramatic effect
-    setTimeout(() => finishHand('dealer_finished'), 1000);
-  }, [dealerHand, calculateHandValue, dealerHitsSoft17, isSoftHand, deck]);
-
   // ==================== HAND COMPLETION LOGIC ====================
   /**
    * END GAME PROCESSING
@@ -605,16 +652,19 @@ const BlackjackTrainer = () => {
    */
   
   // Finish current hand and calculate payouts
-  const finishHand = useCallback((reason) => {
+  const finishHand = useCallback((reason, dealerHandSnapshot, playerHandsSnapshot, handBetsSnapshot, currentBetSnapshot) => {
     setGameState('finished');
     
-    const dealerValue = calculateHandValue(dealerHand);
+    // calculate the dealer's hand value and set hand winnings to 0
+    const dealerValue = calculateHandValue(dealerHandSnapshot);
     let totalWinnings = 0;
     
     // Evaluate each player hand against dealer
-    playerHands.forEach((hand, index) => {
+    playerHandsSnapshot.forEach((hand, index) => {
       const playerValue = calculateHandValue(hand);
-      const handBet = handBets[index] ?? currentBet;
+      const handBet = (handBetsSnapshot && handBetsSnapshot[index] != null)
+      ? handBetsSnapshot[index]
+      : currentBetSnapshot;
       
       // Determine outcome for this hand
       if (playerValue > 21) {
@@ -642,86 +692,69 @@ const BlackjackTrainer = () => {
     
     // Add winnings to bankroll
     setBankroll(prev => Math.max(0, prev + totalWinnings));
-  }, [dealerHand, playerHands, currentBet, handBets, calculateHandValue]);
 
-  // ==================== STATISTICS FUNCTIONS ====================
+    try {
+      const result = resolveBlackjackRound({
+        playerHands: playerHandsSnapshot,
+        dealerHand: dealerHandSnapshot,
+        bankroll,        // current bankroll (after initial bet already deducted)
+        handBets: handBetsSnapshot,
+        defaultBet: currentBetSnapshot,
+        dealerHitsSoft17
+      });
+      console.log('🃏 Round result:', {
+        dealerHand: result.dealerFinalHand.map(c => c.rank + c.suit).join(', '),
+        dealerValue: result.dealerValue,
+        outcomes: result.outcomes.map((o, i) => ({
+          hand: i + 1,
+          cards: playerHandsSnapshot[i].map(c => c.rank + c.suit).join(', '),
+          value: o.playerValue,
+          result: o.result
+        }))
+      });
+      } catch (err) {
+      console.error('Error resolving round:', err);
+      }
+  }, [calculateHandValue, updateStats, setBankroll, setGameState]);
+
+    // ==================== DEALER LOGIC ====================
   /**
-   * STATISTICS TRACKING SYSTEM
-   * Records all game outcomes and decisions for performance analysis.
-   * Enables players to see where their strategy needs improvement.
+   * DEALER AUTOMATION
+   * Dealer plays according to fixed house rules.
+   * No strategy decisions - must hit/stand based on total.
    */
   
-  // Update overall game statistics after each hand
-  const updateStats = useCallback((result, betAmount, netChange) => {
-    setGameStats(prev => ({
-      ...prev,
-      totalHands: prev.totalHands + 1,
-      handsWon: prev.handsWon + (result === 'win' || result === 'blackjack' ? 1 : 0),
-      handsLost: prev.handsLost + (result === 'loss' || result === 'bust' ? 1 : 0),
-      handsPush: prev.handsPush + (result === 'push' ? 1 : 0),
-      totalWagered: prev.totalWagered + betAmount,
-      netWinnings: prev.netWinnings + netChange,
-      blackjacks: prev.blackjacks + (result === 'blackjack' ? 1 : 0),
-      busts: prev.busts + (result === 'bust' ? 1 : 0),
-      surrenders: prev.surrenders + (result === 'surrender' ? 1 : 0)
-    }));
-  }, []);
+  // Dealer plays automatically according to house rules
+  const dealerPlay = useCallback(() => {
+    if (gameState !== 'playing') return; 
 
-  // Record individual decisions for detailed strategy analysis
-  const recordDecision = useCallback((playerHand, dealerUpCard, action) => {
-    // Safety check - ensure we have valid inputs
-    if (!dealerUpCard || !playerHand || playerHand.length === 0) return;
+    let newDealerHand = [...dealerHand];
+    let dealerValue = calculateHandValue(newDealerHand);
+    let currentDeck = [...deck];
     
-    const playerValue = calculateHandValue(playerHand);
-    const dealerValue = dealerUpCard.value;
-    const isSoft = isSoftHand(playerHand);
-    const isPair = playerHand.length === 2 && playerHand[0].rank === playerHand[1].rank;
-    
-    // Create unique scenario identifier for grouping similar situations
-    let scenarioKey;
-    if (isPair) {
-      scenarioKey = `pair_${playerHand[0].rank}_vs_${dealerUpCard.rank}`;
-    } else if (isSoft) {
-      scenarioKey = `soft_${playerValue}_vs_${dealerUpCard.rank}`;
-    } else {
-      scenarioKey = `hard_${playerValue}_vs_${dealerUpCard.rank}`;
+    // Dealer must hit until reaching 17 (or soft 17 based on house rules)
+    while (dealerValue < 17 || (dealerValue === 17 && dealerHitsSoft17 && isSoftHand(newDealerHand))) {
+      // Stop if deck is empty (shouldn't happen in normal play)
+      if (currentDeck.length === 0) break;
+      
+      const newCard = currentDeck.pop();
+      newDealerHand.push(newCard);
+      
+      dealerValue = calculateHandValue(newDealerHand);
     }
+    setDeck(currentDeck);
+    setDealerHand(newDealerHand);
+
+    const playerHandsSnapshot = [...playerHands];
+    const handBetsSnapshot = [...handBets];
+    const currentBetSnapshot = currentBet;
     
-    // Calculate what the optimal decision should have been
-    const optimalAction = getOptimalAction(playerHand, dealerUpCard);
-    
-    // Create decision record
-    const decision = {
-      timestamp: Date.now(),
-      playerHand: [...playerHand],
-      dealerUpCard: { ...dealerUpCard },
-      playerValue,
-      dealerValue,
-      action,
-      optimalAction,
-      scenarioKey,
-      isOptimal: action === optimalAction
-    };
-    
-    // Add to decision history
-    setDecisionHistory(prev => [...prev, decision]);
-    
-    // Update scenario-specific statistics
-    setScenarioStats(prev => {
-      const scenario = prev[scenarioKey] || {
-        count: 0,
-        actions: {},
-        optimalAction,
-        correctDecisions: 0
-      };
-      
-      scenario.count++;
-      scenario.actions[action] = (scenario.actions[action] || 0) + 1;
-      if (action === optimalAction) scenario.correctDecisions++;
-      
-      return { ...prev, [scenarioKey]: scenario };
-    });
-  }, [calculateHandValue, isSoftHand, getOptimalAction]);
+    // Small delay before finishing hand for dramatic effect
+    setTimeout(() => {
+      finishHand('dealer_finished', newDealerHand, playerHandsSnapshot, handBetsSnapshot, currentBetSnapshot);
+    }, 1000);
+  }, [gameState, dealerHand, deck, dealerHitsSoft17, isSoftHand, calculateHandValue, playerHands, handBets, currentBet, finishHand]);
+
 
   // ==================== DATA PERSISTENCE ====================
   /**
@@ -949,7 +982,7 @@ const BlackjackTrainer = () => {
           <p className="text-yellow-800 mb-3">Dealer showing Ace. Insurance available for {formatCurrency(currentBet / 2)}</p>
           <div className="space-x-2">
             <button 
-              onClick={() => setInsuranceOffered(false)}
+              onClick={() => setInsuranceOffered(true)}
               className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded"
             >
               Take Insurance
